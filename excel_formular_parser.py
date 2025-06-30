@@ -1,119 +1,299 @@
-import openpyxl
-import formulas
 import os
 import re
-from urllib.parse import unquote
 import json
+import formulas
+import openpyxl
+import hashlib
 from openpyxl.worksheet.formula import ArrayFormula
 
-# --- 登錄資訊 ---
-print("--- 最終三重視角報告 (V20) ---")
-print("Current Date and Time (UTC - YYYY-MM-DD HH:MM:SS formatted): 2025-06-29 16:26:32")
-print("Current User's Login: ckcm0210")
-print("-" * 60)
-print("目標：在 V19 的基礎上，重新加入『程式讀取公式』的顯示，形成三重視角報告。")
-print("-" * 60)
+display_mode = 'simple'
 
-# --- 設定檔案路徑與目標 ---
 working_path = r"C:\Users\user\Desktop\pytest\Formula Difference Analyzer"
-file_c_path = os.path.join(working_path, "File_C_Manufacturing.xlsx")
-target_sheet_name = 'Cost_Analysis' 
-target_cell_address = 'C3'
-# ----------------------------------------
+initial_task = {
+    "file": os.path.join(working_path, "File_C_Manufacturing2.xlsx"),
+    "sheet": 'Cost_Analysis',
+    "cell": 'C6'}
 
-try:
-    # =================================================================
-    #  Part 1: 外部視角 (用戶所見) - 保持不變
-    # =================================================================
-    print("--- Part 1: 外部視角 (用戶所見) ---")
-    print("1a. [openpyxl] 正在提取並重構權威的『用戶可見公式』...")
+def process_task_recursively(
+    task,
+    prefix="",
+    current_path=None,
+    parent_context=None,
+    unique_nodes_for_report=None,
+    final_dependency_map=None,
+    trace_dependency_vine=None,
+    working_path=None,
+    display_mode="simple"
+):
+    if current_path is None:
+        current_path = set()
 
-    workbook_openpyxl = openpyxl.load_workbook(filename=file_c_path, data_only=False)
-    worksheet_openpyxl = workbook_openpyxl[target_sheet_name]
-    cell_content = worksheet_openpyxl[target_cell_address].value
+    task_identifier = (task["file"], task["sheet"], task["cell"])
     
-    raw_formula_with_indices = str(cell_content.text) if isinstance(cell_content, ArrayFormula) else str(cell_content)
+    if task_identifier in current_path:
+        print(f"{prefix}📍 Circular reference to [{os.path.basename(task['file'])}]{task['sheet']}!{task['cell']} detected, stopping expansion.")
+        return
 
-    reconstructed_formula = raw_formula_with_indices
-    if workbook_openpyxl._external_links:
-        for i, link in enumerate(workbook_openpyxl._external_links):
-            placeholder = f"[{i+1}]"
-            full_external_path = os.path.abspath(os.path.join(working_path, os.path.basename(link.path)))
-            replacement_text = f"'{full_external_path}'"
-            reconstructed_formula = reconstructed_formula.replace(placeholder, replacement_text)
-
-    print("\n--- 🏆 1b. 權威的『用戶可見公式』(已重構) 🏆 ---")
-    print("=" * 45)
-    print(reconstructed_formula)
-    print("=" * 45)
-
-    # =================================================================
-    #  Part 2: 內部視角 (程式所見) - 增加內容
-    # =================================================================
-    print("\n\n--- Part 2: 內部視角 (程式所見) ---")
-    print("2a. [formulas] 正在載入模型以進行深度剖析...")
+    current_path.add(task_identifier)
     
-    excel_model = formulas.ExcelModel().load(file_c_path)
-    target_cell_key = f"'[{os.path.basename(file_c_path)}]COST_ANALYSIS'!{target_cell_address}"
+    if unique_nodes_for_report is not None and task_identifier not in unique_nodes_for_report:
+        unique_nodes_for_report.add(task_identifier)
+        if final_dependency_map is not None:
+            final_dependency_map.append(task)
     
-    # --- 【全新增補】顯示 formulas 讀取的原始公式 ---
-    program_read_formula = excel_model.to_dict()[target_cell_key]
-    print("\n--- 2b. 程式讀取公式 (Formulas Library View) ---")
-    print(program_read_formula)
-    print("------------------------------------------------")
-    # --- 增補結束 ---
+    dependencies, is_formula, content = trace_dependency_vine(task, working_path)
 
-    print("\n--- 2c. 依賴項剖析報告 ---")
-    compiled_cell_object = excel_model.cells[target_cell_key]
-    raw_references = []
-    
-    if hasattr(compiled_cell_object, 'inputs') and compiled_cell_object.inputs:
-        raw_references = list(compiled_cell_object.inputs.keys())
-        print(f"在公式中發現 {len(raw_references)} 個原始內部依賴項。")
+    is_internal_dependency = (
+        display_mode == 'simple' and
+        parent_context and
+        task['file'] == parent_context['file']
+    )
+
+    if is_internal_dependency:
+        if task['sheet'].lower() == parent_context['sheet'].lower():
+            header = task['cell']
+        else:
+            header = f"{task['sheet']}!{task['cell']}"
     else:
-        print("未在公式中發現任何內部依賴項。")
+        header = f"[{os.path.basename(task['file'])}]{task['sheet']}!{task['cell']}"
 
-    # =================================================================
-    #  Part 3: 可用零件拆解 (參照路徑正規化) - 保持不變
-    # =================================================================
-    print("\n\n--- Part 3: 可用零件拆解 (參照路徑正規化) ---")
-    
-    normalized_parts = []
-    if raw_references:
-        print("3a. 正在啟動『參照路徑正規化處理器』...")
-        ref_pattern = re.compile(r"'(.*)\[(.*?)\](.*?)'!(.*)")
+    if not is_formula and content.startswith('['):
+        print(f"{prefix}📍 {header}")
+        print(f"{prefix.replace('📍', ' ' * len('📍'))}🔷 Characteristic: {content}")
+    elif not is_formula:
+        if is_internal_dependency:
+            print(f"{prefix}📍 {header}: {content}")
+        else:
+            print(f"{prefix}📍 {header}: {content}")
+    else:
+        print(f"{prefix}📍 {header}")
+        symbol = "⚙️ Formula:"
+        print(f"{prefix}{symbol} {content}")
 
-        for ref in raw_references:
-            print(f"\n   處理中: {ref}")
-            match = ref_pattern.match(ref)
+    def sort_dependencies_by_formula_order(dependencies, formula):
+        if not formula or not isinstance(formula, str) or not dependencies:
+            return dependencies
+        formula_upper = formula.upper()
+        dep_positions = []
+        for dep in dependencies:
+            dep_cell = dep.get("cell", "")
+            dep_sheet = dep.get("sheet", "")
+            patterns = [
+                re.escape(dep_cell),
+                re.escape(f"{dep_sheet}!{dep_cell}"),
+                re.escape(f"'{dep_sheet}'!{dep_cell}")
+            ]
+            min_pos = len(formula_upper)+1
+            for pat in patterns:
+                m = re.search(pat, formula_upper)
+                if m:
+                    min_pos = min(min_pos, m.start())
+            dep_positions.append((min_pos, dep))
+        dep_positions.sort(key=lambda x: x[0])
+        return [d for pos, d in dep_positions]
+
+    formula_for_order = None
+    if is_formula and isinstance(content, str) and content.startswith("="):
+        formula_for_order = content
+    elif is_formula and isinstance(content, str):
+        formula_for_order = content
+
+    ordered_dependencies = sort_dependencies_by_formula_order(dependencies, formula_for_order)
+
+    for i, dep_task in enumerate(ordered_dependencies):
+        is_last = i == len(ordered_dependencies) - 1
+        child_prefix = (prefix.replace("├─", "│    ").replace("└─", "     ")) + ("└─ " if is_last else "├─ ")
+        process_task_recursively(
+            dep_task,
+            prefix=child_prefix,
+            current_path=current_path.copy(),
+            parent_context=task,
+            unique_nodes_for_report=unique_nodes_for_report,
+            final_dependency_map=final_dependency_map,
+            trace_dependency_vine=trace_dependency_vine,
+            working_path=working_path,
+            display_mode=display_mode
+        )
+
+def trace_dependency_vine(task, working_path):
+    target_file_path, target_sheet_name, target_cell_address = task["file"], task["sheet"], task["cell"]
+    wb_openpyxl = None
+    try:
+        wb_openpyxl = openpyxl.load_workbook(filename=target_file_path, data_only=False)
+        excel_model = formulas.ExcelModel().load(target_file_path)
+
+        actual_sheet_name = next((s for s in wb_openpyxl.sheetnames if s.lower() == target_sheet_name.lower()), None)
+        if not actual_sheet_name:
+            raise ValueError(f"Worksheet '{target_sheet_name}' does not exist.")
+
+        ws_openpyxl = wb_openpyxl[actual_sheet_name]
+        cell_obj = ws_openpyxl[target_cell_address]
+
+        if isinstance(cell_obj, tuple):
+            rows = len(cell_obj)
+            cols = len(cell_obj[0]) if rows > 0 else 0
             
-            if match:
-                relative_path_part, filename_part, sheetname_part, cell_address_part = match.groups()
-                
-                full_relative_path = os.path.join(relative_path_part, filename_part)
-                decoded_path = unquote(full_relative_path)
-                absolute_path = os.path.abspath(os.path.join(os.path.dirname(file_c_path), decoded_path))
-                
-                part = { "absolute_path": absolute_path, "sheet_name": sheetname_part, "cell_address": cell_address_part, "original_reference": ref }
-                normalized_parts.append(part)
-                
-                print(f"     ✅ 拆解成功!")
-                print(f"        -> 絕對路徑: {part['absolute_path']}")
-                print(f"        -> 工作表名: {part['sheet_name']}")
-                print(f"        -> 單元格: {part['cell_address']}")
+            dimension_str = f"[{rows}R x {cols}C]"
+            summary_str = ""
+
+            total_sum = 0
+            numeric_cells_count = 0
+            error_cells_count = 0
+            text_cells_count = 0
+            hash_content_string = ""
+            
+            for row_of_cells in cell_obj:
+                for cell in row_of_cells:
+                    value = cell.value
+                    hash_content_string += str(value) + "||"
+                    
+                    if isinstance(value, (int, float)):
+                        total_sum += value
+                        numeric_cells_count += 1
+                    elif isinstance(value, str):
+                        if value.startswith('#'):
+                            error_cells_count += 1
+                        else:
+                            text_cells_count += 1
+            
+            sha256_hash = hashlib.sha256(hash_content_string.encode('utf-8')).hexdigest()
+            hash_str = f" [Hash: {sha256_hash[:8]}...]"
+
+            if numeric_cells_count > 0:
+                summary_str = f" [Sum: {total_sum:,.2f}]".replace('.00', '')
+            elif error_cells_count > 0:
+                summary_str = f" [Errors: {error_cells_count}]"
+            elif text_cells_count > 0:
+                summary_str = " [Text]"
+
+            display_content = f"{dimension_str}{summary_str}{hash_str}"
+            return [], False, display_content
+
+        cell_content = cell_obj.value
+        is_formula = isinstance(cell_content, ArrayFormula) or (isinstance(cell_content, str) and cell_content.startswith('='))
+        
+        if not is_formula:
+            if isinstance(cell_content, str):
+                display_content = f"'{cell_content}'"
             else:
-                print(f"     ⚠️  注意: 參照 '{ref}' 為內部參照，非外部檔案。")
-                part = { "absolute_path": file_c_path, "sheet_name": ref.split('!')[0].strip("'"), "cell_address": ref.split('!')[1], "original_reference": ref }
+                display_content = str(cell_content)
+        else:
+            display_content = str(cell_content)
+
+        normalized_parts = []
+
+        target_key_lower = f"'[{os.path.basename(target_file_path).lower()}]{actual_sheet_name.lower()}'!{target_cell_address.lower()}"
+        found_key = next((k for k in excel_model.cells if k.lower() == target_key_lower), None)
+        if not found_key:
+            simple_key = f"'{actual_sheet_name}'!{target_cell_address}"
+            if simple_key in excel_model.cells:
+                found_key = simple_key
+        
+        compiled_cell_object = excel_model.cells.get(found_key) if found_key else None
+
+        if compiled_cell_object and hasattr(compiled_cell_object, 'inputs') and compiled_cell_object.inputs:
+             raw_references = list(compiled_cell_object.inputs.keys())
+             ref_pattern = re.compile(r"'(.*)\[(.*?)\](.*?)'!(.*)")
+             for ref in raw_references:
+                part = {}
+                if match := ref_pattern.match(ref):
+                    _, filename_part, sheetname_part, cell_address_part = match.groups()
+                    absolute_path = os.path.join(working_path, filename_part)
+                    part = {"file": absolute_path, "sheet": sheetname_part, "cell": cell_address_part}
+                else:
+                    sheetname_part, cell_address_part = ref.split('!')
+                    part = {"file": target_file_path, "sheet": sheetname_part.strip("'"), "cell": cell_address_part}
                 normalized_parts.append(part)
 
-        print("\n\n--- 🏆 3b. 『可用零件』清單 (已正規化) 🏆 ---")
-        print("=" * 50)
-        print(json.dumps(normalized_parts, indent=2, ensure_ascii=False))
-        print("=" * 50)
-    
-    print(f"\n\n✅✅✅ **最終報告完成！** ✅✅✅")
+        if is_formula:
+            raw_formula = str(cell_content.text) if isinstance(cell_content, ArrayFormula) else str(cell_content)
+            reconstructed_formula = raw_formula
 
-except Exception as e:
-    print(f"\n❌ 發生未知錯誤：{type(e).__name__} - {e}")
-    import traceback
-    traceback.print_exc()
+            if hasattr(wb_openpyxl, "_external_links") and wb_openpyxl._external_links and compiled_cell_object and hasattr(compiled_cell_object, 'inputs'):
+                ref_pattern_for_map = re.compile(r".*\[(.*?)\]")
+                external_filenames = sorted(list({ref_pattern_for_map.match(ref).group(1) for ref in compiled_cell_object.inputs if ref_pattern_for_map.match(ref)}))
+
+                index_to_path_map = {
+                    i + 1: os.path.join(working_path, filename)
+                    for i, filename in enumerate(external_filenames)
+                }
+
+                def replacer(match):
+                    placeholder_index = int(match.group(1))
+                    formula_part = match.group(2)
+                    full_path = index_to_path_map.get(placeholder_index)
+                    if not full_path:
+                        return match.group(0)
+                    if '!' in formula_part:
+                        sheet_name, cell_ref = formula_part.split('!', 1)
+                        return f"'{os.path.dirname(full_path)}\\[{os.path.basename(full_path)}]{sheet_name}'!{cell_ref}"
+                    else:
+                        return f"'{os.path.dirname(full_path)}\\[{os.path.basename(full_path)}]{formula_part}'"
+
+                reconstructed_formula = re.sub(r'\[(\d+)\]([^\]!]+(?:![\$A-Z0-9:]+)?)(?=[,)\s*+\-\/\^=<>:&]|$)', replacer, raw_formula)
+
+            display_content = reconstructed_formula
+            if "INDIRECT" in raw_formula.upper():
+                wb_data_only = None
+                try:
+                    match = re.search(r'INDIRECT\((.*)\)', raw_formula, re.IGNORECASE)
+                    if match:
+                        argument_str = match.group(1)
+                        literals = re.findall(r'"(.*?)"', argument_str)
+                        cell_refs = [ref for ref in re.split(r'"[^"]*"|&', argument_str) if ref]
+
+                        wb_data_only = openpyxl.load_workbook(filename=target_file_path, data_only=True)
+                        ws_data_only = wb_data_only[actual_sheet_name]
+                        evaluated_refs = [str(ws_data_only[cell.strip()].value) for cell in cell_refs]
+                        
+                        final_target_str = ""
+                        if len(literals) == 3 and len(evaluated_refs) == 2:
+                             final_target_str = literals[0] + literals[1] + evaluated_refs[0] + literals[2] + evaluated_refs[1]
+                        
+                        if final_target_str:
+                            ref_match = re.search(r"'?(.*\\\[(.*?)\])(.*?)'?!([A-Z0-9]+)", final_target_str, re.IGNORECASE)
+                            if ref_match:
+                                full_path_part, filename, sheet, cell = ref_match.groups()
+                                dep_filepath = os.path.join(os.path.dirname(full_path_part), filename)
+                                new_task = {"file": dep_filepath, "sheet": sheet, "cell": cell}
+                                normalized_parts.insert(0, new_task)
+                            else:
+                                display_content += f" [Tracer Warning: Could not parse INDIRECT result '{final_target_str}']"
+                except Exception as e:
+                    display_content += f" [Tracer Warning: Could not resolve INDIRECT -> {e}]"
+                finally:
+                    if wb_data_only:
+                        wb_data_only.close()
+
+        return normalized_parts, is_formula, display_content
+
+    except Exception as e:
+        return [], False, f"❌ Error during analysis: {e}"
+    finally:
+        if wb_openpyxl:
+            wb_openpyxl.close()
+
+if __name__ == "__main__":
+    print("--- Tree-based Dependency Tracer ---")
+    print("Current Date and Time (UTC - YYYY-MM-DD HH:MM:SS formatted): 2025-06-30 04:22:24")
+    print("Current User's Login: ckcm0210")
+    print("=" * 70)
+
+    unique_nodes_for_report = set()
+    final_dependency_map = []
+
+    process_task_recursively(
+        initial_task,
+        unique_nodes_for_report=unique_nodes_for_report,
+        final_dependency_map=final_dependency_map,
+        trace_dependency_vine=trace_dependency_vine,
+        working_path=working_path,
+        display_mode=display_mode
+    )
+
+    print("\n\n" + "="*70)
+    print("🌳 **Dependency Tree Traversal Complete!** 🌳")
+    print(f"A total of {len(final_dependency_map)} unique nodes were analyzed for the report.")
+    print("--- Final Dependency Map (Flat List) ---")
+    print(json.dumps(final_dependency_map, indent=2, ensure_ascii=False))
+    print("="*70)
