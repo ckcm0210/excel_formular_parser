@@ -1,0 +1,549 @@
+import re
+from typing import List, Dict, Tuple, Optional, Union
+
+
+class ExcelFormulaFormatterV2:
+    """Excel 公式格式化引擎 - 重寫版本"""
+    
+    def __init__(self, indent_char: str = "    ", verbose: bool = False):
+        """初始化格式化器"""
+        self.indent_char = indent_char
+        self.verbose = verbose
+        self.has_at_symbol = False
+        
+        # Excel 函數名稱清單
+        self.excel_functions = {
+            'SUMPRODUCT', 'INDEX', 'MATCH', 'OFFSET', 'INDIRECT', 'VLOOKUP', 
+            'HLOOKUP', 'IF', 'IFERROR', 'SUMIF', 'SUMIFS', 'COUNTIF', 
+            'COUNTIFS', 'AVERAGEIF', 'AVERAGEIFS', 'AND', 'OR', 'NOT',
+            'SUM', 'AVERAGE', 'COUNT', 'MAX', 'MIN', 'CONCATENATE',
+            'LEFT', 'RIGHT', 'MID', 'LEN', 'TRIM', 'UPPER', 'LOWER',
+            'LOOKUP', 'CHOOSE', 'SUBSTITUTE', 'FIND', 'SEARCH', 'TEXT',
+            'VALUE', 'DATE', 'TIME', 'NOW', 'TODAY', 'YEAR', 'MONTH', 'DAY',
+            'ISERROR', 'ISBLANK', 'ISNUMBER', 'ISTEXT', 'ROUND', 'ABS',
+            'FILTER', 'SORT', 'SORTBY', 'UNIQUE', 'SEQUENCE', 'RANDARRAY',
+            'XLOOKUP', 'XMATCH', 'LET', 'LAMBDA', 'REDUCE', 'MAP', 'SCAN',
+            'BYROW', 'BYCOL', 'MAKEARRAY', 'TAKE', 'DROP', 'CHOOSEROWS',
+            'CHOOSECOLS', 'EXPAND', 'TOCOL', 'TOROW', 'WRAPCOLS', 'WRAPROWS',
+            'COUNTA', 'COUNTBLANK', 'PRODUCT', 'POWER', 'SQRT', 'EXP', 'LN', 'LOG',
+            'LOG10', 'SIN', 'COS', 'TAN', 'ASIN', 'ACOS', 'ATAN', 'ATAN2',
+            'DEGREES', 'RADIANS', 'PI', 'RAND', 'RANDBETWEEN', 'MOD', 'QUOTIENT',
+            'GCD', 'LCM', 'FACT', 'COMBIN', 'PERMUT', 'CEIL', 'FLOOR', 'TRUNC',
+            'INT', 'SIGN', 'EVEN', 'ODD', 'MMULT', 'TRANSPOSE', 'MDETERM', 'MINVERSE'
+        }
+    
+    def _log_message(self, message: str) -> None:
+        """記錄處理訊息"""
+        if self.verbose:
+            print(f"[格式化引擎] {message}")
+    
+    def _is_external_reference(self, token: str) -> bool:
+        """檢測是否為外部參照"""
+        patterns = [
+            r"'[^']*\[[^\]]+\][^']*'![A-Z$]+\d+(?::[A-Z$]+\d+)?",
+            r"'?\[[^\]]+\][^'!]*'?![A-Z$]+\d+(?::[A-Z$]+\d+)?",
+            r"'[^'\[\]]+![A-Z$]+\d+(?::[A-Z$]+\d+)?'",
+            r"[A-Za-z_][A-Za-z0-9_]*![A-Z$]+\d+(?::[A-Z$]+\d+)?"
+        ]
+        
+        for pattern in patterns:
+            if re.match(pattern, token, re.IGNORECASE):
+                return True
+        return False
+    
+    def tokenize_formula(self, formula: str) -> List[str]:
+        """將公式拆解成 tokens - 改進版本"""
+        if formula.startswith('='):
+            formula = formula[1:]
+        
+        if formula.startswith('@'):
+            self.has_at_symbol = True
+            formula = formula[1:]
+        
+        tokens = []
+        i = 0
+        
+        while i < len(formula):
+            char = formula[i]
+            
+            # 處理引號字串
+            if char == '"':
+                string_content = char
+                i += 1
+                while i < len(formula) and formula[i] != '"':
+                    string_content += formula[i]
+                    i += 1
+                if i < len(formula):
+                    string_content += formula[i]
+                    i += 1
+                tokens.append(string_content)
+                continue
+            
+            # 處理單引號參照
+            if char == "'":
+                quote_content = char
+                i += 1
+                while i < len(formula) and formula[i] != "'":
+                    quote_content += formula[i]
+                    i += 1
+                if i < len(formula):
+                    quote_content += formula[i]
+                    i += 1
+                
+                # 檢查後面是否有!
+                if i < len(formula) and formula[i] == '!':
+                    while i < len(formula) and formula[i] not in '(),':
+                        quote_content += formula[i]
+                        i += 1
+                
+                tokens.append(quote_content)
+                continue
+            
+            # 處理方括號
+            if char == '[':
+                bracket_content = char
+                i += 1
+                while i < len(formula) and formula[i] != ']':
+                    bracket_content += formula[i]
+                    i += 1
+                if i < len(formula):
+                    bracket_content += formula[i]
+                    i += 1
+                
+                # 繼續收集到分隔符
+                while i < len(formula) and formula[i] not in '(),':
+                    bracket_content += formula[i]
+                    i += 1
+                
+                tokens.append(bracket_content)
+                continue
+            
+            # 處理括號和逗號
+            if char in '(),':
+                tokens.append(char)
+                i += 1
+                continue
+            
+            # 處理空格
+            if char.isspace():
+                i += 1
+                continue
+            
+            # 處理其他字符
+            current_token = ""
+            while i < len(formula) and formula[i] not in '"\'[](),':
+                if formula[i].isspace():
+                    break
+                current_token += formula[i]
+                i += 1
+            
+            if current_token:
+                tokens.append(current_token)
+        
+        # 後處理：合併函數名稱和括號，處理運算符
+        return self._post_process_tokens(tokens)
+    
+    def _post_process_tokens(self, tokens: List[str]) -> List[str]:
+        """後處理tokens，正確處理函數和運算符"""
+        cleaned_tokens = []
+        i = 0
+        
+        while i < len(tokens):
+            token = tokens[i].strip()
+            if not token:
+                i += 1
+                continue
+            
+            # 函數名稱處理
+            if token.upper() in self.excel_functions:
+                if i + 1 < len(tokens) and tokens[i + 1].strip() == '(':
+                    cleaned_tokens.append(token + '(')
+                    i += 2
+                else:
+                    cleaned_tokens.append(token)
+                    i += 1
+                continue
+            
+            # 運算符處理
+            if token in ['-', '+', '*', '/', '>', '<', '=']:
+                # 檢查是否為數字前綴
+                if token in ['-', '+'] and i + 1 < len(tokens):
+                    next_token = tokens[i + 1].strip()
+                    if next_token.isdigit():
+                        cleaned_tokens.append(token + next_token)
+                        i += 2
+                        continue
+                
+                # 檢查是否為比較運算符
+                if token in ['>', '<', '='] and i + 1 < len(tokens):
+                    next_token = tokens[i + 1].strip()
+                    if next_token.isdigit():
+                        cleaned_tokens.append(token + next_token)
+                        i += 2
+                        continue
+                    elif token == '>' and next_token == '=':
+                        cleaned_tokens.append('>=')
+                        i += 2
+                        continue
+                    elif token == '<' and next_token in ['=', '>']:
+                        cleaned_tokens.append(token + next_token)
+                        i += 2
+                        continue
+            
+            cleaned_tokens.append(token)
+            i += 1
+        
+        return cleaned_tokens
+    
+    def parse_formula_structure(self, tokens: List[str]) -> Optional[Dict]:
+        """使用堆疊方式解析公式結構 - 全新實現"""
+        if not tokens:
+            return None
+        
+        self._log_message(f"開始堆疊解析，共 {len(tokens)} 個 tokens")
+        
+        # 使用堆疊追蹤函數層級
+        function_stack = []
+        current_function = None
+        current_args = []
+        current_arg_tokens = []
+        i = 0
+        
+        while i < len(tokens):
+            token = tokens[i]
+            self._log_message(f"處理 token {i}: '{token}', 堆疊深度: {len(function_stack)}")
+            
+            if self._is_function_start(token):
+                # 完成前一個參數
+                if current_arg_tokens and current_function:
+                    arg_expr = self._create_expression(current_arg_tokens)
+                    if arg_expr:
+                        current_args.append(arg_expr)
+                    current_arg_tokens = []
+                
+                # 建立新函數
+                function_name = token[:-1]
+                new_function = {
+                    'type': 'function',
+                    'name': function_name,
+                    'arguments': []
+                }
+                
+                # 如果有當前函數，推入堆疊
+                if current_function:
+                    function_stack.append({
+                        'function': current_function,
+                        'args': current_args,
+                        'pending_tokens': current_arg_tokens
+                    })
+                
+                current_function = new_function
+                current_args = []
+                current_arg_tokens = []
+                
+            elif token == ')':
+                # 完成當前參數
+                if current_arg_tokens:
+                    arg_expr = self._create_expression(current_arg_tokens)
+                    if arg_expr:
+                        current_args.append(arg_expr)
+                    current_arg_tokens = []
+                
+                # 完成當前函數
+                if current_function:
+                    current_function['arguments'] = current_args
+                    self._log_message(f"完成函數 {current_function['name']}，參數數量: {len(current_args)}")
+                    
+                    # 檢查堆疊
+                    if function_stack:
+                        # 恢復上層函數
+                        parent_context = function_stack.pop()
+                        parent_function = parent_context['function']
+                        parent_args = parent_context['args']
+                        parent_pending = parent_context['pending_tokens']
+                        
+                        # 將完成的函數加入父函數參數
+                        parent_args.append(current_function)
+                        
+                        current_function = parent_function
+                        current_args = parent_args
+                        current_arg_tokens = parent_pending
+                    else:
+                        # 這是最外層函數完成
+                        # 檢查是否有運算符跟在後面
+                        if i + 1 < len(tokens):
+                            next_token = tokens[i + 1]
+                            if next_token in ['-', '+', '*', '/', '>', '<', '='] or next_token.startswith(('-', '+', '>', '<', '=')):
+                                # 將函數轉為表達式的一部分
+                                expr_tokens = [current_function]
+                                i += 1
+                                
+                                # 收集後續運算符和操作數
+                                while i < len(tokens) and tokens[i] not in [',', ')']:
+                                    expr_tokens.append(tokens[i])
+                                    i += 1
+                                
+                                current_function = self._create_compound_expression(expr_tokens)
+                                i -= 1  # 調整索引
+                            else:
+                                # 檢查是否還有更多內容（可能是另一個參數）
+                                if i + 1 < len(tokens) and tokens[i + 1] == ',':
+                                    # 這不是最終結果，繼續處理
+                                    pass
+                                else:
+                                    # 確實是最終結果
+                                    return current_function
+                
+            elif token == ',':
+                # 完成當前參數
+                if current_arg_tokens:
+                    arg_expr = self._create_expression(current_arg_tokens)
+                    if arg_expr:
+                        current_args.append(arg_expr)
+                    current_arg_tokens = []
+                
+            else:
+                # 收集參數tokens
+                current_arg_tokens.append(token)
+            
+            i += 1
+        
+        # 處理最後的內容
+        if current_arg_tokens and current_function:
+            arg_expr = self._create_expression(current_arg_tokens)
+            if arg_expr:
+                current_args.append(arg_expr)
+        
+        if current_function:
+            current_function['arguments'] = current_args
+        
+        return current_function
+    
+    def _create_expression(self, tokens: List[str]) -> Optional[Dict]:
+        """創建表達式節點"""
+        if not tokens:
+            return None
+        
+        filtered_tokens = [t.strip() for t in tokens if t.strip()]
+        if not filtered_tokens:
+            return None
+        
+        if len(filtered_tokens) == 1:
+            token = filtered_tokens[0]
+            if self._is_external_reference(token):
+                return {'type': 'external_reference', 'value': token}
+            else:
+                return {'type': 'argument', 'value': token}
+        else:
+            # 處理複合表達式
+            expression_value = ''.join(filtered_tokens)
+            return {'type': 'expression', 'value': expression_value}
+    
+    def _create_compound_expression(self, elements: List[Union[Dict, str]]) -> Dict:
+        """創建複合表達式（函數+運算符）"""
+        parts = []
+        for element in elements:
+            if isinstance(element, dict):
+                if element['type'] == 'function':
+                    args_str = ','.join(self._format_arg_for_expression(arg) for arg in element['arguments'])
+                    parts.append(f"{element['name']}({args_str})")
+                else:
+                    parts.append(element['value'])
+            else:
+                parts.append(str(element))
+        
+        return {
+            'type': 'expression',
+            'value': ''.join(parts)
+        }
+    
+    def _format_arg_for_expression(self, arg: Dict) -> str:
+        """為表達式格式化參數"""
+        if arg['type'] == 'function':
+            sub_args = ','.join(self._format_arg_for_expression(sub_arg) for sub_arg in arg['arguments'])
+            return f"{arg['name']}({sub_args})"
+        else:
+            return arg['value']
+    
+    def _is_function_start(self, token: str) -> bool:
+        """檢查是否為函數開始"""
+        if token.endswith('('):
+            function_name = token[:-1]
+            return function_name.upper() in self.excel_functions
+        return False
+    
+    def format_structure_to_string(self, node: Dict, indent_level: int = 0) -> str:
+        """將樹狀結構格式化成字串"""
+        if node is None:
+            return ""
+        
+        current_indent = self.indent_char * indent_level
+        
+        if node['type'] == 'function':
+            function_name = node['name']
+            
+            # 判斷是否需要多行顯示
+            has_complex_args = any(
+                arg['type'] in ['function', 'external_reference'] 
+                for arg in node['arguments']
+            )
+            
+            # 複雜參數或參數過多時使用多行格式
+            if has_complex_args or len(node['arguments']) > 3:
+                result = f"{current_indent}{function_name}(\n"
+                
+                # 格式化每個參數
+                for i, arg in enumerate(node['arguments']):
+                    formatted_arg = self.format_structure_to_string(arg, indent_level + 1)
+                    
+                    if i < len(node['arguments']) - 1:
+                        result += f"{formatted_arg},\n"
+                    else:
+                        result += f"{formatted_arg}\n"
+                
+                result += f"{current_indent})"
+                return result
+            else:
+                # 簡單參數使用單行格式
+                args_str = ', '.join(
+                    self.format_structure_to_string(arg, 0).strip()
+                    for arg in node['arguments']
+                )
+                return f"{current_indent}{function_name}({args_str})"
+                
+        elif node['type'] in ['external_reference', 'expression', 'argument']:
+            return f"{current_indent}{node['value']}"
+        
+        return ""
+    
+    def format_excel_formula(self, formula: str) -> Tuple[str, str]:
+        """格式化 Excel 公式，返回 (原始公式, 格式化結果)"""
+        original_formula = formula
+        
+        try:
+            self._log_message(f"開始處理公式: {formula}")
+            
+            self.has_at_symbol = False
+            
+            tokens = self.tokenize_formula(formula)
+            self._log_message(f"拆解得到 {len(tokens)} 個符號單元")
+            
+            if self.verbose:
+                print(f"[Debug] Tokens: {tokens}")
+            
+            structure = self.parse_formula_structure(tokens)
+            self._log_message("結構解析完成")
+            
+            if structure is None:
+                raise Exception("無法解析公式結構")
+            
+            formatted_result = self.format_structure_to_string(structure)
+            
+            if self.has_at_symbol:
+                formatted_result = f"@{formatted_result}"
+                self._log_message("已還原 @ 符號")
+            
+            formatted_result = f"={formatted_result}"
+            
+            self._log_message("格式化完成")
+            return original_formula, formatted_result
+            
+        except Exception as e:
+            error_msg = f"格式化過程中發生錯誤: {str(e)}"
+            self._log_message(f"✗ {error_msg}")
+            return original_formula, f"錯誤: {error_msg}"
+
+
+def excel_formula_formatter_v2(formula: str, verbose: bool = False, indent_char: str = "    ") -> None:
+    """Excel 公式格式化引擎 V2 - 包含原始公式對比"""
+    formatter = ExcelFormulaFormatterV2(indent_char=indent_char, verbose=verbose)
+    original, formatted = formatter.format_excel_formula(formula)
+    
+    print("=" * 80)
+    print("📝 Excel 公式格式化結果")
+    print("=" * 80)
+    
+    print("\n🔍 原始公式:")
+    print("-" * 40)
+    print(original)
+    
+    print("\n✨ 格式化結果:")
+    print("-" * 40)
+    print(formatted)
+    
+    print("\n" + "=" * 80)
+
+
+def test_complex_formulas_v2():
+    """測試複雜公式案例 V2"""
+    
+    print("🧪 測試複雜嵌套函數案例 V2")
+    print("=" * 80)
+    
+    # 測試案例 1: 基本嵌套
+    test_case_1 = r"""=SUMPRODUCT(INDEX('C:\Users\user\Desktop\pytest\Formula Difference Analyzer\新增資料夾\[e.xlsx]DataE'!B1:B10, MATCH(3, 'C:\Users\user\Desktop\pytest\Formula Difference Analyzer\新增資料夾\[e.xlsx]DataE'!B1:B10, 0)))"""
+    
+    print("\n📝 測試案例 1: 三層嵌套函數")
+    excel_formula_formatter_v2(test_case_1, verbose=True)
+    
+    print("\n" + "-" * 60)
+    
+    # 測試案例 2: @ 符號
+    test_case_2 = r"""=@OFFSET(INDIRECT("'[e.xlsx]DataE'!B1"),1,0)"""
+    
+    print("\n📝 測試案例 2: @ 符號動態函數")
+    excel_formula_formatter_v2(test_case_2, verbose=True)
+    
+    print("\n" + "-" * 60)
+    
+    # 測試案例 3: 超複雜嵌套（主要問題案例）
+    test_case_3 = r"""=IF(ISERROR(INDEX(INDIRECT("'[data.xlsx]Sheet1'!A:A"),MATCH(CONCATENATE("Key",TEXT(TODAY(),"YYYY-MM-DD")),INDIRECT("'[data.xlsx]Sheet1'!B:B"),0))),SUMPRODUCT(OFFSET(INDIRECT("'[backup.xlsx]Data'!C1"),1,0,COUNTA(INDIRECT("'[backup.xlsx]Data'!C:C"))-1,1)*(INDIRECT("'[backup.xlsx]Data'!D2:D1000")>0)),INDEX(INDIRECT("'[data.xlsx]Sheet1'!A:A"),MATCH(CONCATENATE("Key",TEXT(TODAY(),"YYYY-MM-DD")),INDIRECT("'[data.xlsx]Sheet1'!B:B"),0)))"""
+    
+    print("\n📝 測試案例 3: 超級複雜多層嵌套 (修正版)")
+    excel_formula_formatter_v2(test_case_3, verbose=True)
+    
+    print("\n" + "-" * 60)
+    
+    # 測試案例 4: 現代函數
+    test_case_4 = r"""=@FILTER(SORT(UNIQUE(XLOOKUP(SEQUENCE(10),INDEX('[modern.xlsx]Data'!A:A,0),INDEX('[modern.xlsx]Data'!B:B,0))),1,TRUE),XLOOKUP(SEQUENCE(10),INDEX('[modern.xlsx]Data'!A:A,0),INDEX('[modern.xlsx]Data'!C:C,0))>0)"""
+    
+    print("\n📝 測試案例 4: 現代 Excel 函數組合")
+    excel_formula_formatter_v2(test_case_4, verbose=True)
+
+
+def quick_format_v2(formula: str) -> str:
+    """快速格式化函數 V2"""
+    formatter = ExcelFormulaFormatterV2(verbose=False)
+    _, formatted = formatter.format_excel_formula(formula)
+    return formatted
+
+
+def detailed_format_v2(formula: str) -> None:
+    """詳細格式化函數 V2"""
+    excel_formula_formatter_v2(formula, verbose=True)
+
+
+if __name__ == "__main__":
+    print("🚀 Excel 公式格式化引擎 V2 - 重寫版")
+    print("✨ 新增功能：原始公式對比、改善解析邏輯")
+    print("=" * 80)
+    
+    test_complex_formulas_v2()
+    
+    print("\n" + "=" * 80)
+    print("🎯 引擎使用示範")
+    print("=" * 80)
+    
+    print("在其他程式中使用方法:")
+    print("```python")
+    print("from excel_formula_formatter_v2 import excel_formula_formatter_v2, quick_format_v2")
+    print("")
+    print("# 完整對比格式化")
+    print('excel_formula_formatter_v2("=SUM(A1:B10)", verbose=True)')
+    print("")
+    print("# 快速格式化")
+    print('result = quick_format_v2("=SUM(A1:B10)")')
+    print("")
+    print("# 詳細模式")
+    print('detailed_format_v2(formula)')
+    print("```")
